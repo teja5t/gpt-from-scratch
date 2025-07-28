@@ -20,6 +20,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, config.n_embd * 3)
         #output (value down?)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.SCALE = 1
         
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -51,6 +52,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, config.n_embd * 4)
         self.GELU = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(config.n_embd * 4, config.n_embd)
+        self.c_proj.SCALE = 1
         
     def forward(self, x):
         x = self.c_fc(x)
@@ -86,6 +88,18 @@ class GPT(nn.Module):
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias = False) #turn embeddings to tokens
         self.transformer.wte.weight = self.lm_head.weight
+        self.apply(self._init_weights)
+        
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'SCALE'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
         
     def forward(self, idx, targets=None):
         B, T = idx.size()
@@ -204,7 +218,7 @@ print(f"using device: {device}")
 num_return_sequences = 4
 max_length = 30
 
-dl = DataLoaderLite(4, 32)
+dl = DataLoaderLite(16, 1024)
 model = GPT(GPTConfig())
 model.to(device)
 

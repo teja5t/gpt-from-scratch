@@ -3,7 +3,15 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import math
+import tiktoken
 
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50257
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -62,15 +70,6 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
-        
-
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50257
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
     
 class GPT(nn.Module):
     
@@ -87,7 +86,7 @@ class GPT(nn.Module):
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias = False) #turn embeddings to tokens
         
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T < self.config.block_size
         
@@ -101,7 +100,11 @@ class GPT(nn.Module):
             
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
-        return logits
+        
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
     
     @classmethod
     def from_pretrained(cls, model_type, override_args=None):
@@ -159,20 +162,45 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
         return model
 
+
+#auto-detect device
+device = "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = "mps"
+print(f"using device: {device}")
+
+
 num_return_sequences = 5
 max_length = 30
-
-model = GPT.from_pretrained('gpt2')
-model.eval()
-#model.to('cuda')
-
-import tiktoken
 enc = tiktoken.get_encoding('gpt2')
-tokens = enc.encode("Hello, I'm a language model,")
-tokens = torch.tensor(tokens, dtype = torch.long)
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-x = tokens
-#x = tokens.to('cuda')
+with open("input.txt", "r") as f:
+    text = f.read()
+    
+tokens = enc.encode(text)
+B, T = 4, 32
+buf = torch.tensor(tokens[:B*T+1], dtype=torch.long, device=device)
+x = buf[:-1].view(B, T)
+y = buf[1:].view(B, T)
+
+print(x, y)
+
+model = GPT(GPTConfig())
+model.eval()
+model.to(device)
+logits, loss = model(x, y)
+print(loss)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(50):
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
+    print(f"step: {i}, loss: {loss.item()}")
+
+import sys; sys.exit(0)
 
 while x.size(1) < max_length:
     with torch.no_grad():

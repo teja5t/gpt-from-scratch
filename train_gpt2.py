@@ -85,6 +85,7 @@ class GPT(nn.Module):
         ))
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias = False) #turn embeddings to tokens
+        self.transformer.wte.weight = self.lm_head.weight
         
     def forward(self, idx, targets=None):
         B, T = idx.size()
@@ -163,6 +164,34 @@ class GPT(nn.Module):
         return model
 
 
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+        
+        with open("input.txt", "r") as f:
+            text = f.read()
+            
+        enc = tiktoken.get_encoding('gpt2')
+        self.tokens = torch.tensor(enc.encode(text))
+        print(f"loaded {len(self.tokens)} tokens")
+        print(f"1 epoch = {len(self.tokens) // (B*T)} batches")
+        
+        self.current_position = 0
+        
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position : self.current_position + B * T + 1]
+        x = buf[:-1].view(B, T)
+        y = buf[1:].view(B, T)
+        
+        self.current_position += B * T
+        if self.current_position > len(self.tokens) - B * T - 1:
+            self.current_position = 0
+        return x, y
+            
+        
+
 #auto-detect device
 device = "cpu"
 if torch.cuda.is_available():
@@ -172,36 +201,27 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
 print(f"using device: {device}")
 
 
-num_return_sequences = 5
+num_return_sequences = 4
 max_length = 30
-enc = tiktoken.get_encoding('gpt2')
-with open("input.txt", "r") as f:
-    text = f.read()
-    
-tokens = enc.encode(text)
-B, T = 4, 32
-buf = torch.tensor(tokens[:B*T+1], dtype=torch.long, device=device)
-x = buf[:-1].view(B, T)
-y = buf[1:].view(B, T)
 
-print(x, y)
-
+dl = DataLoaderLite(4, 32)
 model = GPT(GPTConfig())
-model.eval()
 model.to(device)
-logits, loss = model(x, y)
-print(loss)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
+    x, y = dl.next_batch()
+    x = x.to(device)
+    y = y.to(device)
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
     print(f"step: {i}, loss: {loss.item()}")
 
-import sys; sys.exit(0)
+#import sys; sys.exit(0)
 
+model.eval()
 while x.size(1) < max_length:
     with torch.no_grad():
         logits = model(x)
@@ -212,6 +232,7 @@ while x.size(1) < max_length:
         xcol = torch.gather(topk_indices, -1, ix)
         x = torch.cat((x, xcol), dim=1)
         
+enc = tiktoken.get_encoding('gpt2')
 for i in range(num_return_sequences):
     tokens = x[i,:max_length].tolist()
     decoded = enc.decode(tokens)

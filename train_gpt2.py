@@ -35,10 +35,11 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         
-        att = q @ k.transpose(-2, -1) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        y = att @ v
+        #att = q @ k.transpose(-2, -1) * (1.0 / math.sqrt(k.size(-1)))
+        #att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        #att = F.softmax(att, dim=-1)
+        #y = att @ v
+        y = F.scaled_dot_product_attention(k, q, v, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
         return y
@@ -103,7 +104,7 @@ class GPT(nn.Module):
         
     def forward(self, idx, targets=None):
         B, T = idx.size()
-        assert T < self.config.block_size
+        assert T <= self.config.block_size
         
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
         pos_emb = self.transformer.wpe(pos)
@@ -214,26 +215,34 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print(f"using device: {device}")
 
+torch.set_float32_matmul_precision('high')
 
 num_return_sequences = 4
 max_length = 30
 
-dl = DataLoaderLite(16, 1024)
-model = GPT(GPTConfig())
+dl = DataLoaderLite(4, 1024)
+model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
-
+model = torch.compile(model)
+import time
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
+    t0 = time.time()
     x, y = dl.next_batch()
     x = x.to(device)
     y = y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"step: {i}, loss: {loss.item()}")
+    t1 = time.time()
+    dt = (t1 - t0)*1000
+    tokens_per_second = (dl.B * dl.T) / (t1-t0)
+    print(f"step: {i}, loss: {loss.item()}, dt: {dt:.2f}, tokens per second: {tokens_per_second}")
 
-#import sys; sys.exit(0)
+import sys; sys.exit(0)
+
 
 model.eval()
 while x.size(1) < max_length:

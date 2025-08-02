@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import math
 import tiktoken
+import inspect
 
 @dataclass
 class GPTConfig:
@@ -177,6 +178,31 @@ class GPT(nn.Module):
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
         return model
+    
+    def configure_optimizers(self, weight_decay, learning_rate, device_type):
+            # start with all of the candidate parameters (that require grad)
+            param_dict = {pn: p for pn, p in self.named_parameters()}
+            param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+            # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+            # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+            decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+            nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+            optim_groups = [
+                {'params': decay_params, 'weight_decay': weight_decay},
+                {'params': nodecay_params, 'weight_decay': 0.0}
+            ]
+            num_decay_params = sum(p.numel() for p in decay_params)
+            num_nodecay_params = sum(p.numel() for p in nodecay_params)
+            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+            # Create AdamW optimizer and use the fused version if it is available
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and device_type == "cuda"
+            print(f"using fused AdamW: {use_fused}")
+            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+            return optimizer            
+            
+
 
 
 class DataLoaderLite:
@@ -204,9 +230,8 @@ class DataLoaderLite:
         if self.current_position > len(self.tokens) - B * T - 1:
             self.current_position = 0
         return x, y
-            
-        
 
+    
 #auto-detect device
 device = "cpu"
 if torch.cuda.is_available():
@@ -215,12 +240,20 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print(f"using device: {device}")
 
+total_batch_size = 524288 # 2**19
+B = 32 #micro batch size
+T = 1024 # sequence length
+assert total_batch_size % B == 0, f"total_batch_size {total_batch_size} must be divisible by B {B}"
+grad_accum_steps = total_batch_size // (B * T)
+print(f"total_batch_size: {total_batch_size}")
+print(f"calculated grad_accum_steps: {grad_accum_steps}")
+
 torch.set_float32_matmul_precision('high')
 
 num_return_sequences = 4
 max_length = 30
 
-dl = DataLoaderLite(4, 1024)
+dl = DataLoaderLite(B, T)
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model = torch.compile(model)
@@ -236,6 +269,7 @@ for i in range(50):
         logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
+    torch.cuda.synchronize()
     t1 = time.time()
     dt = (t1 - t0)*1000
     tokens_per_second = (dl.B * dl.T) / (t1-t0)

@@ -258,15 +258,37 @@ model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model = torch.compile(model)
 import time
-for i in range(50):
+optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
+
+max_lr = 6e-4
+min_lr = max_lr / 10
+warmup_steps = 10
+max_steps = 50
+
+def get_lr(step):
+    if step < warmup_steps:
+        return max_lr * (step + 1) / warmup_steps
+    if step >= max_steps:
+        return min_lr
+    
+    decay = (step - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay <= 1, f"decay {decay} out of bounds"
+    coeff = 0.5 * (1 + math.cos(math.pi * decay))
+    return min_lr + (max_lr - min_lr) * coeff
+
+for step in range(max_steps):
     t0 = time.time()
-    x, y = dl.next_batch()
-    x = x.to(device)
-    y = y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
-    loss.backward()
+    loss_accum = 0.0
+    for micro_step in range(grad_accum_steps):
+        x, y = dl.next_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        loss = loss / grad_accum_steps # scale loss for gradient accumulation
+        loss_accum += loss.detach()
+        loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
@@ -274,8 +296,8 @@ for i in range(50):
     torch.cuda.synchronize()
     t1 = time.time()
     dt = (t1 - t0)*1000
-    tokens_per_second = (dl.B * dl.T) / (t1-t0)
-    print(f"step: {i}, loss: {loss.item()}, dt: {dt:.2f}, tokens per second: {tokens_per_second}")
+    tokens_per_second = (dl.B * dl.T * grad_accum_steps) / (t1-t0)
+    print(f"step: {step:4d} | loss: {loss_accum:6f} | lr: {lr:.4f} | norm: {norm:.4f} | dt: {dt:.2f}ms | tokens per second: {tokens_per_second}")
 
 import sys; sys.exit(0)
 

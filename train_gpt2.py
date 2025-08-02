@@ -258,7 +258,6 @@ model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model = torch.compile(model)
 import time
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
     t0 = time.time()
     x, y = dl.next_batch()
@@ -268,6 +267,9 @@ for i in range(50):
     with torch.autocast(device_type=device, dtype=torch.bfloat16):
         logits, loss = model(x, y)
     loss.backward()
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
     torch.cuda.synchronize()
     t1 = time.time()

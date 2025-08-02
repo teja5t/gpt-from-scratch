@@ -271,7 +271,7 @@ if torch.cuda.is_available():
 device_type = "cuda" if device.startswith("cuda") else "cpu"
 
 total_batch_size = 524288 # 2**19
-B = 32 #micro batch size
+B = 64 #micro batch size
 T = 1024 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"total_batch_size {total_batch_size} must be divisible by B, T, and ddp_world_size {B}, {T}, {ddp_world_size}"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -292,14 +292,15 @@ model.to(device)
 model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
+raw_model = model.module if ddp else model # get the raw model for saving, if DDP is used
 
 import time
-optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
+optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
 
 max_lr = 6e-4
-min_lr = max_lr / 10
-warmup_steps = 10
-max_steps = 50
+min_lr = max_lr * 0.1
+warmup_steps = 715
+max_steps = 19073
 
 def get_lr(step):
     if step < warmup_steps:
@@ -362,3 +363,6 @@ for i in range(num_return_sequences):
     tokens = x[i,:max_length].tolist()
     decoded = enc.decode(tokens)
     print(">", decoded)
+
+#to run, do 
+# torchrun --standalone --nproc_per_node=8 train_gpt2.py

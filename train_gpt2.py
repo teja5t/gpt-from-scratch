@@ -219,6 +219,7 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
         return model
     
+    
     def configure_optimizers(self, weight_decay, learning_rate, device_type):
             # start with all of the candidate parameters (that require grad)
             param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -239,7 +240,7 @@ class GPT(nn.Module):
             # Create AdamW optimizer and use the fused version if it is available
             fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
             use_fused = fused_available and device_type == "cuda"
-            if master_process
+            if master_process:
                 print(f"using fused AdamW: {use_fused}")
             optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
             return optimizer            
@@ -307,7 +308,9 @@ val_loader = DataLoaderLite(B, T, ddp_rank, ddp_world_size, split='val')
 
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
-model = torch.compile(model)
+no_compile = True
+if not no_compile:
+    model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # get the raw model for saving, if DDP is used
@@ -331,6 +334,8 @@ def get_lr(step):
     coeff = 0.5 * (1 + math.cos(math.pi * decay))
     return min_lr + (max_lr - min_lr) * coeff
 
+enc = tiktoken.get_encoding('gpt2')
+
 for step in range(max_steps):
     t0 = time.time()
     
@@ -353,7 +358,30 @@ for step in range(max_steps):
         if master_process:
             print(f"validation loss: {val_loss_accum:6f}")
     
-    
+    if ((step > 0 and step % 100 == 0) or (step == max_steps - 1)) and no_compile:
+        model.eval()
+        num_return_sequences = 4
+        max_length = 32
+        tokens = enc.encode("Hello, I'm a language model,")
+        tokens = torch.tensor(tokens, dtype=torch.long)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        xgen = tokens.to(device)
+        sample_rng = torch.Generator(device=device)
+        sample_rng.manual_seed(42 + ddp_rank)
+        while xgen.size(1) < max_length:
+            with torch.no_grad():
+                logits = model(xgen)
+                logits = logits[:,-1,:]
+                probs = F.softmax(logits, dim=-1)
+                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                ix = torch.multinomial(topk_probs, 1, generator=sample_rng)
+                xcol = torch.gather(topk_indices, -1, ix)
+                xgen = torch.cat((xgen, xcol), dim=1)
+
+        for i in range(num_return_sequences):
+            tokens = xgen[i,:max_length].tolist()
+            decoded = enc.decode(tokens)
+            print(">", decoded)
     
     model.train()
     optimizer.zero_grad()
@@ -399,7 +427,6 @@ while x.size(1) < max_length:
         xcol = torch.gather(topk_indices, -1, ix)
         x = torch.cat((x, xcol), dim=1)
         
-enc = tiktoken.get_encoding('gpt2')
 for i in range(num_return_sequences):
     tokens = x[i,:max_length].tolist()
     decoded = enc.decode(tokens)

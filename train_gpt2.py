@@ -310,8 +310,8 @@ def get_most_likely_row(tokens, mask, logits):
     return pred_norm
 
 
-total_batch_size = 524288 # 2**19
-B = 32 #micro batch size
+total_batch_size = 2097152 # 2**19
+B = 64 #micro batch size
 T = 1024 # sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0, f"total_batch_size {total_batch_size} must be divisible by B, T, and ddp_world_size {B}, {T}, {ddp_world_size}"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -386,7 +386,7 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % 5000 == 0 or last_step):
+            if step > 0 and (step % 5000 == 0 or step == max_steps - 1):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
@@ -445,7 +445,7 @@ for step in range(max_steps):
         sample_rng.manual_seed(42 + ddp_rank)
         while xgen.size(1) < max_length:
             with torch.no_grad():
-                logits = model(xgen)
+                logits, loss = model(xgen)
                 logits = logits[:,-1,:]
                 probs = F.softmax(logits, dim=-1)
                 topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)

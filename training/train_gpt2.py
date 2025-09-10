@@ -9,9 +9,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 import os
 import numpy as np
-from hellaswag import render_example, iterate_examples
-from config import GPTConfig
-from transformer import GPT
+from training.hellaswag import render_example, iterate_examples
+from model.config import GPTConfig
+from model.transformer import GPT
 
 
 # set up DDP (distributed data parallel).
